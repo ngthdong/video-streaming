@@ -12,7 +12,8 @@ class Server:
 			exit()
 			
 		rtspSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		rtspSocket.bind(('', SERVER_PORT))
+		rtspSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		rtspSocket.bind(('0.0.0.0', SERVER_PORT))  # Listen on all interfaces
 		rtspSocket.listen(5)        
 
 		# Receive client info (address,port) through RTSP/TCP session

@@ -15,6 +15,11 @@ class ServerWorker:
 	PLAYING = 2
 	state = INIT
 	
+	# MTU configuration for UDP fragmentation
+	# Ethernet MTU: 1500 bytes
+	# IP header: 20 bytes, UDP header: 8 bytes, RTP header: 12 bytes, Frag header: 8 bytes
+	# Usable payload: 1500 - 20 - 8 - 12 - 8 = 1452 bytes (use 1400 for safety)
+	MTU_PAYLOAD_SIZE = 1400
 
 	OK_200 = 0
 	FILE_NOT_FOUND_404 = 1
@@ -87,6 +92,8 @@ class ServerWorker:
 					self.clientInfo['transport'] = "TCP"
 
 				self.clientInfo['rtpPort'] = request[2].split(' ')[3]
+				# Store client IP for RTP packet sending (critical for remote clients)
+				self.clientInfo['clientIP'] = self.clientInfo['rtspSocket'][1][0]
 
 				print(self.clientInfo)
 		
@@ -190,9 +197,18 @@ class ServerWorker:
 			if data: 
 				frameNumber = self.clientInfo['videoStream'].frameNbr()
 				try:
-					address = self.clientInfo['rtspSocket'][1][0]
+					address = self.clientInfo['clientIP']  # Use stored client IP for remote connections
 					port = int(self.clientInfo['rtpPort'])
-					self.clientInfo['rtpSocket'].sendto(self.makeRtp(data, frameNumber),(address,port))
+					
+					# Check if frame needs fragmentation
+					if len(data) > self.MTU_PAYLOAD_SIZE:
+						# Fragment the frame
+						fragments = self.fragmentFrame(data, frameNumber)
+						for fragment in fragments:
+							self.clientInfo['rtpSocket'].sendto(fragment, (address, port))
+					else:
+						# Send as single packet without fragmentation
+						self.clientInfo['rtpSocket'].sendto(self.makeRtp(data, frameNumber), (address, port))
 				except:
 					print("Connection Error")
 
@@ -248,16 +264,46 @@ class ServerWorker:
 		
 		return rtpPacket.getPacket()
 
-	def makeTCP(self, payload, frameNbr):
+	def fragmentFrame(self, frameData, frameNbr):
+		"""Fragment a frame into multiple UDP packets if it exceeds MTU.
+		
+		Returns a list of RTP packets with fragmentation headers.
 		"""
-		Create TCP packet for video frame.
-		Format:
-		[4 bytes frame size][4 bytes frame number][payload]
-		"""
-		frameSize = len(payload)
-		header = frameSize.to_bytes(4, 'big') + frameNbr.to_bytes(4, 'big')
-
-		return header + payload
+		fragments = []
+		frameSize = len(frameData)
+		
+		# Calculate number of fragments needed
+		numFragments = (frameSize + self.MTU_PAYLOAD_SIZE - 1) // self.MTU_PAYLOAD_SIZE
+		
+		version = 2
+		padding = 0
+		extension = 0
+		cc = 0
+		marker = 0
+		pt = 26  # MJPEG type
+		seqnum = frameNbr
+		ssrc = 0
+		
+		# Create fragments
+		for fragIndex in range(numFragments):
+			startIdx = fragIndex * self.MTU_PAYLOAD_SIZE
+			endIdx = min(startIdx + self.MTU_PAYLOAD_SIZE, frameSize)
+			payload = frameData[startIdx:endIdx]
+			
+			# Create fragmentation info
+			fragInfo = {
+				'frame_id': frameNbr,
+				'fragment_index': fragIndex,
+				'total_fragments': numFragments
+			}
+			
+			rtpPacket = RtpPacket()
+			rtpPacket.encode(version, padding, extension, cc, seqnum + fragIndex, 
+						   marker, pt, ssrc, payload, fragmentation_info=fragInfo)
+			
+			fragments.append(rtpPacket.getPacket())
+		
+		return fragments
 
 	def replyRtsp(self, code, seq):
 		"""Send RTSP reply to the client."""

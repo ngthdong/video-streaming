@@ -42,7 +42,6 @@ class Client:
 		self.currentTime = 0
 
 		self.totalFrames = Utils.get_total_frame_mjpeg(filename)
-		self.currentFrames = 0
 
 		self.transportMode = 'UDP' if 'sd' in filename else "TCP"
 
@@ -52,6 +51,10 @@ class Client:
 		self.BUFFER_SIZE = 100     # max frame trong buffer
 		self.PREBUFFER = 50         # frame numbers need to play 
 		self.bufferLock = threading.Lock()
+		
+		# Fragment reassembly buffers for UDP
+		self.fragmentBuffer = {}  # {frame_id: {frag_index: data}}
+		self.fragmentLock = threading.Lock()
 
 		if not os.path.exists(CACHE_DIR):
 			os.makedirs(CACHE_DIR)
@@ -279,21 +282,60 @@ class Client:
 
 					if data:
 						rtpPacket = RtpPacket()
-						rtpPacket.decode(data)
-
-						currFrameNbr = rtpPacket.seqNum()
-						self.currentFrames += 1
-						self.updateProgress()
-
-						print("Current Seq Num:", currFrameNbr)
-
-						payload = rtpPacket.getPayload()
-
-						with self.bufferLock:
-							if len(self.buffer) < self.BUFFER_SIZE:
-								self.buffer.append((currFrameNbr, payload))
 						
-						self.updateBufferBar()
+						# Try decoding with fragmentation support
+						rtpPacket.decode_with_fragmentation(data)
+						
+						fragInfo = rtpPacket.getFragmentationInfo()
+						
+						if fragInfo:
+							# This is a fragmented packet
+							frameId = fragInfo['frame_id']
+							fragIndex = fragInfo['fragment_index']
+							totalFrags = fragInfo['total_fragments']
+							payload = rtpPacket.getPayload()
+							
+							with self.fragmentLock:
+								# Initialize fragment buffer for this frame if needed
+								if frameId not in self.fragmentBuffer:
+									self.fragmentBuffer[frameId] = {}
+								
+								# Store this fragment
+								self.fragmentBuffer[frameId][fragIndex] = payload
+								
+								# Check if we have all fragments
+								if len(self.fragmentBuffer[frameId]) == totalFrags:
+									# Reassemble the frame
+									completeFrame = b''
+									for i in range(totalFrags):
+										completeFrame += self.fragmentBuffer[frameId][i]
+									
+									# Clean up
+									del self.fragmentBuffer[frameId]
+									
+									self.updateProgress()
+		
+									print(f"Frame reassembled: {frameId} ({totalFrags} fragments)")
+									
+									with self.bufferLock:
+										if len(self.buffer) < self.BUFFER_SIZE:
+											self.buffer.append((frameId, completeFrame))
+									
+									self.updateBufferBar()
+						else:
+							# Non-fragmented packet
+							currFrameNbr = rtpPacket.seqNum()
+							self.updateProgress()
+
+							print("Current Seq Num:", currFrameNbr)
+
+							payload = rtpPacket.getPayload()
+
+							with self.bufferLock:
+								if len(self.buffer) < self.BUFFER_SIZE:
+									self.buffer.append((currFrameNbr, payload))
+							
+							self.updateBufferBar()
 
 				else:  # TCP
 					header = self.rtpSocket.recv(4)
@@ -318,7 +360,7 @@ class Client:
 						rtpPacket.decode(data)
 
 						currFrameNbr = rtpPacket.seqNum()
-						self.currentFrames += 1
+
 						self.updateProgress()
 
 						print("Current Seq Num:", currFrameNbr)
@@ -545,7 +587,6 @@ class Client:
 
 		# Keep current frameNbr for continuity, reset only progress tracking
 		# self.frameNbr stays the same - server will seek to this frame
-		self.currentFrames = 0
 		self.totalFrames = Utils.get_total_frame_mjpeg(self.fileName)
 		
 		# reconnect (this also resets sessionId to 0)
