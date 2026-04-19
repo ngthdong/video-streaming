@@ -1,7 +1,7 @@
 from tkinter import *
 import tkinter.messagebox as tkMessageBox
 from PIL import Image, ImageTk
-import socket, threading, sys, traceback, os
+import socket, threading, sys, traceback, os, time
 
 from RtpPacket import RtpPacket
 from Utils import Utils 
@@ -53,8 +53,10 @@ class Client:
 		self.bufferLock = threading.Lock()
 		
 		# Fragment reassembly buffers for UDP
-		self.fragmentBuffer = {}  # {frame_id: {frag_index: data}}
+		# Structure: {frame_id: {'timestamp': arrival_time, 'fragments': {frag_index: data}}}
+		self.fragmentBuffer = {}  # {frame_id: {'timestamp': float, 'fragments': {frag_index: data}}}
 		self.fragmentLock = threading.Lock()
+		self.FRAGMENT_TIMEOUT_MS = 100  # timeout in milliseconds for incomplete fragments
 
 		if not os.path.exists(CACHE_DIR):
 			os.makedirs(CACHE_DIR)
@@ -184,6 +186,28 @@ class Client:
 
 	def hideLoading(self):
 		self.loadingLabel.place_forget()
+
+	def _cleanupTimedOutFragments(self):
+		"""Remove incomplete frames from fragmentBuffer if timeout exceeded.
+		This method should be called with fragmentLock held."""
+		current_time = time.time()
+		timeout_seconds = self.FRAGMENT_TIMEOUT_MS / 1000.0
+		
+		# Collect frame IDs to remove (to avoid modifying dict during iteration)
+		frames_to_remove = []
+		
+		for frameId, frame_data in self.fragmentBuffer.items():
+			timestamp = frame_data['timestamp']
+			elapsed_time = current_time - timestamp
+			
+			# If timeout exceeded, mark for removal
+			if elapsed_time > timeout_seconds:
+				frames_to_remove.append(frameId)
+		
+		# Remove timed-out frames and log
+		for frameId in frames_to_remove:
+			del self.fragmentBuffer[frameId]
+			print(f"Removed incomplete frame {frameId} (timeout: {self.FRAGMENT_TIMEOUT_MS}ms)")
 	
 	def setupMovie(self):
 		"""Setup button handler."""
@@ -296,19 +320,25 @@ class Client:
 							payload = rtpPacket.getPayload()
 							
 							with self.fragmentLock:
+								# Periodically clean up timed-out frames
+								self._cleanupTimedOutFragments()
+								
 								# Initialize fragment buffer for this frame if needed
 								if frameId not in self.fragmentBuffer:
-									self.fragmentBuffer[frameId] = {}
+									self.fragmentBuffer[frameId] = {
+										'timestamp': time.time(),
+										'fragments': {}
+									}
 								
 								# Store this fragment
-								self.fragmentBuffer[frameId][fragIndex] = payload
+								self.fragmentBuffer[frameId]['fragments'][fragIndex] = payload
 								
 								# Check if we have all fragments
-								if len(self.fragmentBuffer[frameId]) == totalFrags:
+								if len(self.fragmentBuffer[frameId]['fragments']) == totalFrags:
 									# Reassemble the frame
 									completeFrame = b''
 									for i in range(totalFrags):
-										completeFrame += self.fragmentBuffer[frameId][i]
+										completeFrame += self.fragmentBuffer[frameId]['fragments'][i]
 									
 									# Clean up
 									del self.fragmentBuffer[frameId]
