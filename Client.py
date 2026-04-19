@@ -232,9 +232,6 @@ class Client:
 		if self.state == self.PLAYING:
 			self.sendRtspRequest(self.PAUSE)
 
-			with self.bufferLock:
-				self.buffer.clear()
-
 	def playMovie(self):
 		"""Play button handler."""
 		if self.state == self.READY:
@@ -597,9 +594,13 @@ class Client:
 		# stop RTP thread
 		if self.state == self.PLAYING:
 			self.pauseMovie()
-		else:
-			with self.bufferLock:
-				self.buffer.clear()
+		
+		# Always clear buffers for quality switch
+		with self.bufferLock:
+			self.buffer.clear()
+		
+		with self.fragmentLock:
+			self.fragmentBuffer.clear()
 
 		if quality == "SD":
 			self.transportMode = "UDP"
